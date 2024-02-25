@@ -23,7 +23,7 @@ fn pod_status_message(pod: &Pod) -> Option<String> {
         .as_ref()?
         .container_statuses
         .as_ref()?
-        .into_iter()
+        .iter()
         .filter_map(|status| status.state.as_ref()?.waiting.as_ref()?.message.clone())
         .collect::<Vec<_>>()
         .join("\n");
@@ -40,7 +40,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .list(&ListParams::default())
         .await?
         .into_iter()
-        .filter(|d| d.metadata.name.and_then(|name| name.starts_with("kube-").))
+        .filter(|d| {
+            d.metadata
+                .name
+                .as_ref()
+                .is_some_and(|name| !name.starts_with("kube-"))
+        })
     {
         let name = dbg!(d.name_any());
         let status = d.status.as_ref().unwrap();
@@ -58,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await
                 .unwrap()
                 .iter()
-                .filter_map(|pod| pod_status_message(pod))
+                .filter_map(pod_status_message)
                 .collect();
             messages.dedup();
             messages
