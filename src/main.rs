@@ -1,80 +1,41 @@
-// use futures::{StreamExt, TryStreamExt};
-use k8s_openapi::api::{apps::v1::Deployment, core::v1::Pod};
-use kube::{
-    api::{Api, ListParams, ResourceExt},
-    Client,
-};
+#[macro_use]
+extern crate lazy_static;
 
-fn label_selector(deployment: Deployment) -> Option<String> {
-    let labels = deployment
-        .spec?
-        .selector
-        .match_labels?
-        .iter()
-        .map(|(key, value)| format!("{}={}", key, value))
-        .collect::<Vec<_>>()
-        .join(",");
-    Some(labels)
-}
+use std::env;
 
-fn pod_status_message(pod: &Pod) -> Option<String> {
-    let messages = pod
-        .status
-        .as_ref()?
-        .container_statuses
-        .as_ref()?
-        .iter()
-        .filter_map(|status| status.state.as_ref()?.waiting.as_ref()?.message.clone())
-        .collect::<Vec<_>>()
-        .join("\n");
-    Some(messages)
-}
+use actix_web::middleware::Logger;
+use actix_web::HttpServer;
+
+mod deployment_status;
+mod templates;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Infer the runtime environment and try to create a Kubernetes Client
-    let client = Client::try_default().await?;
-
-    let deployment: Api<Deployment> = Api::all(client.clone());
-    for d in deployment
-        .list(&ListParams::default())
-        .await?
-        .into_iter()
-        .filter(|d| {
-            d.metadata
-                .name
-                .as_ref()
-                .is_some_and(|name| !name.starts_with("kube-"))
-        })
-    {
-        let name = dbg!(d.name_any());
-        let status = d.status.as_ref().unwrap();
-        let ready_replicas = status.ready_replicas.unwrap_or_default();
-        let replicas = status.replicas.unwrap_or_default();
-
-        let status_message = if ready_replicas != replicas {
-            let pods: Api<Pod> = Api::default_namespaced(client.clone());
-            let Some(label_selector) = label_selector(d) else {
-                continue;
-            };
-            let lp = ListParams::default().labels(&label_selector);
-            let mut messages: Vec<String> = pods
-                .list(&lp)
-                .await
-                .unwrap()
-                .iter()
-                .filter_map(pod_status_message)
-                .collect();
-            messages.dedup();
-            messages
-        } else {
-            Vec::new()
-        };
-        println!(
-            "{name} {ready_replicas}/{replicas} {}",
-            status_message.join("\n")
-        );
+async fn main() -> anyhow::Result<()> {
+    if env::var("RUST_LOG").is_err() {
+        env::set_var("RUST_LOG", "info");
     }
+    pretty_env_logger::init();
 
-    Ok(())
+    Ok(HttpServer::new(|| {
+        App::new()
+            .wrap(Logger::default())
+            .service(index)
+            .service(actix_files::Files::new("/static", "./static"))
+    })
+    .bind(("0.0.0.0", 8080))?
+    .run()
+    .await?)
+}
+
+use actix_web::{get, App, HttpResponse, Responder};
+use log::error;
+
+#[get("/")]
+async fn index() -> impl Responder {
+    let page_build = templates::load_index().await;
+    let Ok(page) = page_build else {
+        error!("{page_build:?}");
+        return HttpResponse::InternalServerError().finish();
+    };
+    HttpResponse::Ok().body(page)
 }
